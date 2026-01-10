@@ -79,3 +79,22 @@ Some packages have version mismatches from requirements.txt but work fine:
 - av: 14.2.0 (requires 11.0.0)
 - spacy: 3.8.7 (requires 3.7.6)
 - xformers: not installed (required but made optional via patches)
+
+## Upstream PR Notes
+
+When submitting a PR to facebookresearch/audiocraft, reference these related issues:
+
+**macOS/Apple Silicon (long-standing requests):**
+- #230 - xFormers error on M1
+- #43 - Apple Silicon M1 support request
+- #31 - Apple Silicon feature request
+- #13 - Running on M1 help
+- #587 - CPU-only Docker support for macOS ARM64
+- #573 - Training on Mac M4 memory issues
+
+**xformers issues:**
+- #407 - MAGNeT models require xformers backend
+- #362 - xformers/torch module conflict
+
+**Related PRs:**
+- #487 - Update dependencies for torch v2.2.x, 2.3.x (similar compatibility goal)
