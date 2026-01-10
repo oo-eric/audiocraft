@@ -12,7 +12,8 @@ This repo has been patched to run on macOS ARM (Apple Silicon) without xformers:
 
 1. **audiocraft/modules/transformer.py**
    - Made xformers import optional (try/except wrapper)
-   - Falls back to PyTorch's `scaled_dot_product_attention` when xformers unavailable
+   - Auto-disables `memory_efficient` attention when xformers unavailable (the PyTorch fallback doesn't work correctly and produces garbled audio)
+   - Falls back to standard PyTorch MultiheadAttention instead
    - Uses `torch.unbind` instead of `xformers.ops.unbind`
 
 2. **audiocraft/utils/profiler.py**
@@ -40,10 +41,24 @@ See NOTES.md for full installation instructions.
 from audiocraft.models import MusicGen
 from audiocraft.data.audio import audio_write
 
-model = MusicGen.get_pretrained('facebook/musicgen-medium', device='cpu')
-model.set_generation_params(duration=10)
-wav = model.generate(['acoustic guitar melody'])
-audio_write('output', wav[0].cpu(), model.sample_rate, strategy='loudness')
+model = MusicGen.get_pretrained('facebook/musicgen-small', device='cpu')
+model.set_generation_params(
+    duration=10,
+    use_sampling=True,
+    top_k=250,
+    top_p=0.0,
+    temperature=1.0,
+    cfg_coef=3.0
+)
+wav = model.generate(['lo-fi hip hop beats to study to'])
+audio_write(
+    'output',
+    wav[0].cpu(),
+    model.sample_rate,
+    strategy='loudness',
+    loudness_headroom_db=16,
+    loudness_compressor=True
+)
 ```
 
 ### Available Models

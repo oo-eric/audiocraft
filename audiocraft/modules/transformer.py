@@ -181,7 +181,8 @@ class StreamingMultiheadAttention(StreamingModule):
         self.embed_dim = embed_dim
         self.causal = causal
         self.past_context = past_context
-        self.memory_efficient = memory_efficient
+        # Disable memory_efficient when xformers not available - fallback doesn't work correctly
+        self.memory_efficient = memory_efficient and XFORMERS_AVAILABLE
         self.attention_as_float32 = attention_as_float32
         self.rope = rope
         self.cross_attention = cross_attention
@@ -416,8 +417,14 @@ class StreamingMultiheadAttention(StreamingModule):
 
                 p = self.dropout if self.training else 0
                 if _efficient_attention_backend == 'torch' or not XFORMERS_AVAILABLE:
-                    x = torch.nn.functional.scaled_dot_product_attention(
-                        q, k, v, is_causal=attn_mask is not None, dropout_p=p)
+                    # Use is_causal for simple causal attention (when attn_mask is LowerTriangularMask or similar)
+                    # Otherwise pass the actual mask
+                    if custom_attn_mask:
+                        x = torch.nn.functional.scaled_dot_product_attention(
+                            q, k, v, attn_mask=attn_mask, dropout_p=p)
+                    else:
+                        x = torch.nn.functional.scaled_dot_product_attention(
+                            q, k, v, is_causal=(attn_mask is not None), dropout_p=p)
                 else:
                     x = xformers_ops.memory_efficient_attention(q, k, v, attn_mask, p=p)
             else:
