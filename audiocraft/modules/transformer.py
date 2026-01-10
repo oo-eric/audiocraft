@@ -20,7 +20,13 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
-from xformers import ops
+
+try:
+    from xformers import ops as xformers_ops
+    XFORMERS_AVAILABLE = True
+except ImportError:
+    xformers_ops = None
+    XFORMERS_AVAILABLE = False
 
 from .rope import RotaryEmbedding
 from .streaming import StreamingModule
@@ -235,7 +241,7 @@ class StreamingMultiheadAttention(StreamingModule):
         # We actually return a bias for the attention score, as this has the same
         # convention both in the builtin MHA in Pytorch, and Xformers functions.
         time_dim = _get_attention_time_dimension(self.memory_efficient)
-        if self.memory_efficient:
+        if self.memory_efficient and XFORMERS_AVAILABLE:
             from xformers.ops import LowerTriangularMask
             if current_steps == 1:
                 # If we only have one step, then we do not need a mask.
@@ -371,7 +377,7 @@ class StreamingMultiheadAttention(StreamingModule):
                     else:
                         bound_layout = "b t p h d"
                     packed = rearrange(projected, f"b t (p h d) -> {bound_layout}", p=3, h=self.num_heads)
-                    q, k, v = ops.unbind(packed, dim=2)
+                    q, k, v = torch.unbind(packed, dim=2)
                 else:
                     embed_dim = self.embed_dim
                     per_head_dim = (embed_dim // self.num_heads)
@@ -409,11 +415,11 @@ class StreamingMultiheadAttention(StreamingModule):
                     attn_mask = attn_mask[..., :seq_len, :seq_len]
 
                 p = self.dropout if self.training else 0
-                if _efficient_attention_backend == 'torch':
+                if _efficient_attention_backend == 'torch' or not XFORMERS_AVAILABLE:
                     x = torch.nn.functional.scaled_dot_product_attention(
                         q, k, v, is_causal=attn_mask is not None, dropout_p=p)
                 else:
-                    x = ops.memory_efficient_attention(q, k, v, attn_mask, p=p)
+                    x = xformers_ops.memory_efficient_attention(q, k, v, attn_mask, p=p)
             else:
                 # We include the dot product as float32, for consistency
                 # with the other implementations that include that step
@@ -666,6 +672,9 @@ class StreamingTransformer(StreamingModule):
         elif method == 'torch':
             return torch_checkpoint(layer, *args, use_reentrant=False, **kwargs)
         elif method.startswith('xformers'):
+            if not XFORMERS_AVAILABLE:
+                # Fall back to torch checkpointing if xformers not available
+                return torch_checkpoint(layer, *args, use_reentrant=False, **kwargs)
             from xformers.checkpoint_fairinternal import checkpoint, _get_default_policy
             if method == 'xformers_default':
                 # those operations will be saved, and not recomputed.
@@ -724,31 +733,30 @@ class StreamingTransformer(StreamingModule):
 # special attention related function
 
 def _verify_xformers_memory_efficient_compat():
+    if not XFORMERS_AVAILABLE:
+        import warnings
+        warnings.warn(
+            "xformers is not installed. Falling back to torch attention. "
+            "Memory efficient attention will use PyTorch's scaled_dot_product_attention."
+        )
+        return
     try:
         from xformers.ops import memory_efficient_attention, LowerTriangularMask  # noqa
     except ImportError:
-        raise ImportError(
-            "xformers is not installed. Please install it and try again.\n"
-            "To install on AWS and Azure, run \n"
-            "FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST='8.0'\\\n"
-            "pip install -U git+https://git@github.com/fairinternal/xformers.git#egg=xformers\n"
-            "To install on FAIR Cluster, run \n"
-            "FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST='6.0;7.0'\\\n"
-            "pip install -U git+https://git@github.com/fairinternal/xformers.git#egg=xformers\n")
+        pass  # Already handled by XFORMERS_AVAILABLE check
 
 
 def _verify_xformers_internal_compat():
+    if not XFORMERS_AVAILABLE:
+        import warnings
+        warnings.warn(
+            "xformers is not installed. Some checkpointing features may not be available."
+        )
+        return
     try:
         from xformers.checkpoint_fairinternal import checkpoint, _get_default_policy  # noqa
     except ImportError:
-        raise ImportError(
-            "Francisco's fairinternal xformers is not installed. Please install it and try again.\n"
-            "To install on AWS and Azure, run \n"
-            "FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST='8.0'\\\n"
-            "pip install -U git+https://git@github.com/fairinternal/xformers.git#egg=xformers\n"
-            "To install on FAIR Cluster, run \n"
-            "FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST='6.0;7.0'\\\n"
-            "pip install -U git+https://git@github.com/fairinternal/xformers.git#egg=xformers\n")
+        pass  # xformers installed but fairinternal not available
 
 
 def _is_custom(custom: bool, memory_efficient: bool):
