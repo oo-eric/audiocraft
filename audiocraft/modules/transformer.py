@@ -444,6 +444,9 @@ class StreamingMultiheadAttention(StreamingModule):
                 else:
                     pre_w = torch.einsum(f"{query_layout},{key_layout}-> b h t k", q, k)
                 if attn_mask is not None:
+                    # Slice mask to match actual sequence length (mask may be padded for xformers)
+                    seq_len = pre_w.shape[-1]
+                    attn_mask = attn_mask[..., :seq_len, :seq_len].to(pre_w.dtype)
                     pre_w = pre_w + attn_mask
                 w = torch.softmax(pre_w, dim=-1)
                 w = F.dropout(w, self.dropout, training=self.training).to(v)
