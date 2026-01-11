@@ -6,7 +6,7 @@
 - [x] MusicGen - works
 - [x] AudioGen - works
 - [ ] MAGNeT - fails with tensor shape mismatch, needs investigation (test script at demos/magnet_test.py)
-- [ ] JASCO - requires HuggingFace auth (gated model), test script at demos/jasco_test.py
+- [x] JASCO - works
 
 ### Clean Up for Upstream
 - [ ] Remove `demos/test.py` - personal test script
@@ -52,3 +52,4 @@ This PR enables AudioCraft to run on macOS ARM64 (Apple Silicon) by making xform
 - macOS ARM64 (Apple Silicon)
 - MusicGen (small, medium)
 - AudioGen (medium)
+- JASCO

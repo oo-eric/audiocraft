@@ -26,7 +26,7 @@ model.set_generation_params(
 )
 
 # Text description
-text = "Upbeat jazz piano with drums"
+text = "post-punk synthpop"
 
 # Chord progression: (chord, start_time_in_seconds)
 chords = [
