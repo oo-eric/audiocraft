@@ -70,7 +70,7 @@ audio_write(
 ## Known Issues
 
 - xformers doesn't work on macOS (incompatible with PyTorch 2.1.0 via conda)
-- Gradio demo has version compatibility issues
+- Gradio demo requires version 3.50.2 (run `pip install gradio==3.50.2`)
 - Generation is slow on CPU (several minutes for medium model)
 
 ## Dependencies Note
