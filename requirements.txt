@@ -8,9 +8,9 @@ julius
 num2words
 numpy<2.0.0
 sentencepiece
-spacy==3.7.6
-torch==2.6.0
-torchaudio==2.6.0
+spacy>=3.8
+torch==2.14.1
+torchaudio==2.11.0  # pure-python since 2.9; load/save need torchcodec
 huggingface_hub
 tqdm
 transformers>=4.31.0  # need Encodec there.
@@ -22,8 +22,6 @@ gradio
 torchmetrics
 encodec
 protobuf
-torchvision==0.21.0
-torchtext==0.18.0
 pesq
 pystoi
 torchdiffeq
