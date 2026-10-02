@@ -28,7 +28,8 @@ This repo has been patched to run on macOS ARM (Apple Silicon) without xformers:
 
 3. **audiocraft/utils/autocast.py**
    - Disables autocast for MPS device. Originally because torch 2.1 didn't support it; torch 2.14
-     does, but fp16/bf16 autocast gave no speed or memory gain (weights stay fp32), so it stays off
+     does, but the transformer weights are already fp16, so autocast adds nothing (see
+     "Precision on MPS")
 
 ## Setup (macOS ARM)
 
@@ -71,16 +72,25 @@ Outputs match: MusicGen/AudioGen tokens are bit-identical, JASCO latents differ 
 relative, and MAGNeT forward logits differ by ~1e-6 with every argmax agreeing (its sampled tokens
 drift apart over the iterative decode, which is expected).
 
-Mixed precision, measured before the SDPA fix:
+### Precision on MPS
 
-| Model | fp32 (default) | fp16 autocast | bf16 autocast |
-|-------|----------------|---------------|---------------|
-| MusicGen-small | 5.8s | 6.3s | — |
-| MusicGen-medium | 11.6s | 11.7s | 14.6s |
+On any non-CPU device the loader sets `cfg.dtype = 'float16'`, so the LM transformer weights are
+stored in fp16 (embeddings, output heads and the conditioner projection stay fp32). The input
+activations are fp32, and MPS silently upcasts fp16 weights in mixed-dtype ops (CPU raises
+instead), so the math runs in fp32. That gives fp16 memory with fp32 numerics: tokens are
+bit-identical to an all-fp32 LM.
 
-MusicGen-medium peaks at ~5.4 GB of MPS memory with or without autocast. At batch size 1 the
-decode loop is bound by kernel launches, not by math, so lower precision doesn't help. If memory
-becomes the bottleneck, try casting the LM weights to fp16 rather than enabling autocast.
+MusicGen-medium, 5s, with the SDPA fix:
+
+| LM precision | Time | Peak MPS memory | Tokens |
+|---|---|---|---|
+| Default (fp16 storage, fp32 compute) | 6.6s | 5.3 GiB | — |
+| `model.lm.half()` (fp16 compute) | 6.3s | 5.3 GiB | diverge from step 0; no NaNs |
+| `model.lm.float()` (all fp32) | 8.1s | 11.3 GiB | identical to default |
+
+Autocast, measured before the SDPA fix with the default weights: fp16 autocast matched the
+default (11.7s vs 11.6s for medium) and bf16 was slower (14.6s), because it re-casts the fp16
+weights on every op.
 
 Older torch 2.1 numbers (MPS / CPU), not re-measured: MusicGen-small 15s / 28s,
 AudioGen-medium 29s / 82s, MAGNeT-small (10s) 8s / 29s.
