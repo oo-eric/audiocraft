@@ -12,8 +12,15 @@ This repo has been patched to run on macOS ARM (Apple Silicon) without xformers:
 
 1. **audiocraft/modules/transformer.py**
    - Made xformers import optional (try/except wrapper)
-   - Auto-disables `memory_efficient` attention when xformers unavailable (the PyTorch fallback doesn't work correctly and produces garbled audio)
-   - Falls back to standard PyTorch MultiheadAttention instead
+   - Without xformers, `memory_efficient` attention runs on torch's `scaled_dot_product_attention`
+     (~1.6-2x faster on MPS than the einsum path, same outputs)
+   - `_get_mask` returns `None` for single-step decoding whether or not xformers is installed. The
+     old "garbled audio" bug came from building a mask tensor there: the SDPA branch then ran
+     `is_causal=True` with 1 query vs N keys, which torch aligns top-left, so each new token only
+     attended to the first key
+   - `set_efficient_attention_backend('xformers')` falls back to `'torch'` when xformers is missing.
+     The backend also picks the q/k/v layout, so leaving it on `'xformers'` (as the MAGNeT loader
+     does) would hand SDPA a `b t h d` tensor where it expects `b h t d`
    - Uses `torch.unbind` instead of `xformers.ops.unbind`
 
 2. **audiocraft/utils/profiler.py**
@@ -50,7 +57,21 @@ model = MusicGen.get_pretrained('facebook/musicgen-small', device='mps')
 
 ### MPS Performance
 
-torch 2.14.1, generation time only (after model load + one warm-up generate), 5s of audio:
+torch 2.14.1, generation time only (after model load + one warm-up generate). "Before" is
+`memory_efficient` forced off (the old patch), "after" is torch SDPA:
+
+| Model | Before | After |
+|-------|--------|-------|
+| MusicGen-small (5s) | 5.8s | 3.0s |
+| AudioGen-medium (5s) | 11.9s | 7.3s |
+| MAGNeT-small (10s) | 4.8s | 4.4s |
+| JASCO-400M (10s, Euler 50 steps) | 6.5s | 6.3s |
+
+Outputs match: MusicGen/AudioGen tokens are bit-identical, JASCO latents differ by ~1e-6
+relative, and MAGNeT forward logits differ by ~1e-6 with every argmax agreeing (its sampled tokens
+drift apart over the iterative decode, which is expected).
+
+Mixed precision, measured before the SDPA fix:
 
 | Model | fp32 (default) | fp16 autocast | bf16 autocast |
 |-------|----------------|---------------|---------------|
@@ -108,6 +129,11 @@ audio_write(
 - Gradio demo was pinned to 3.50.2 and hasn't been tested on the torch 2.14 setup
 - `torchaudio.load`/`save` need `torchcodec` on torchaudio 2.9+. Inference is unaffected, but the
   mp3/aac augmentation in `audiocraft/data/audio_utils.py` and the visqol metric will fail without it
+- JASCO on MPS fails with its default dopri5 ODE solver: torchdiffeq builds its tolerances in
+  float64, which MPS doesn't support. Use `set_generation_params(euler=True, euler_steps=50)`
+- Installing xformers on macOS buys nothing: there's no wheel, the source build needs `-fopenmp`
+  stripped for Apple clang, and every attention kernel is CUDA/ROCm only (MAGNeT crashes on MPS
+  with it installed, since its loader asks for the xformers backend)
 
 ## Dependencies Note
 
