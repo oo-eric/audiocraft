@@ -504,6 +504,10 @@ class FlowMatchingModel(StreamingModule):
                                                    cfg_terms=cfg_terms)
 
             ode_opts: dict = {"options": {}}
+            if z_0.device.type == 'mps':
+                # torchdiffeq keeps step sizes and tolerances in float64 by default, which MPS
+                # does not support.
+                ode_opts["options"]["dtype"] = torch.float32
             z = odeint(
                 inner_ode_func,
                 z_0,

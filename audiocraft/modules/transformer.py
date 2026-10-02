@@ -38,6 +38,10 @@ def set_efficient_attention_backend(backend: str = 'torch'):
     # Using torch by default, it seems a bit faster on older P100 GPUs (~20% faster).
     global _efficient_attention_backend
     assert _efficient_attention_backend in ['xformers', 'torch']
+    if backend == 'xformers' and not XFORMERS_AVAILABLE:
+        # The backend also selects the q/k/v layout, so it has to match the kernel that actually
+        # runs: without xformers, that is torch's scaled_dot_product_attention.
+        backend = 'torch'
     _efficient_attention_backend = backend
 
 
@@ -181,8 +185,7 @@ class StreamingMultiheadAttention(StreamingModule):
         self.embed_dim = embed_dim
         self.causal = causal
         self.past_context = past_context
-        # Disable memory_efficient when xformers not available - fallback doesn't work correctly
-        self.memory_efficient = memory_efficient and XFORMERS_AVAILABLE
+        self.memory_efficient = memory_efficient
         self.attention_as_float32 = attention_as_float32
         self.rope = rope
         self.cross_attention = cross_attention
@@ -242,16 +245,20 @@ class StreamingMultiheadAttention(StreamingModule):
         # We actually return a bias for the attention score, as this has the same
         # convention both in the builtin MHA in Pytorch, and Xformers functions.
         time_dim = _get_attention_time_dimension(self.memory_efficient)
-        if self.memory_efficient and XFORMERS_AVAILABLE:
-            from xformers.ops import LowerTriangularMask
+        if self.memory_efficient:
             if current_steps == 1:
                 # If we only have one step, then we do not need a mask.
                 return None
             elif 'past_keys' in self._streaming_state:
                 raise RuntimeError("Not supported at the moment")
-            else:
+            elif XFORMERS_AVAILABLE:
                 # Then we can safely use a lower triangular mask
+                from xformers.ops import LowerTriangularMask
                 return LowerTriangularMask()
+            # Without xformers, fall through and build the causal mask as a tensor. There are no
+            # past keys, so query and key lengths match and the torch path's `is_causal=True`
+            # lines up with it. (A single-step decode must return None above: `is_causal` with
+            # one query against N keys only lets the query see the first key.)
         if self._streaming_state:
             past_keys = self._streaming_state['past_keys']
             past_steps = past_keys.shape[time_dim]
