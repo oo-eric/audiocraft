@@ -95,7 +95,7 @@ that provides pointers to configuration, example grids and model/task-specific i
 
 ## API documentation
 
-We provide some [API documentation](https://oo-eric.github.io/audiocraft/api_docs/audiocraft/index.html) for AudioCraft.
+Upstream AudioCraft provides [API documentation](https://facebookresearch.github.io/audiocraft/api_docs/audiocraft/index.html); it covers this fork too.
 
 ## FAQ
 
