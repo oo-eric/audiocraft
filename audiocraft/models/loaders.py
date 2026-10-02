@@ -19,11 +19,13 @@ They also support overriding some parameters, in particular the device and dtype
 of the returned model.
 """
 
+import collections
 from pathlib import Path
 from huggingface_hub import hf_hub_download
 import typing as tp
 import os
 
+import omegaconf
 from omegaconf import OmegaConf, DictConfig
 import torch
 
@@ -37,38 +39,47 @@ def get_audiocraft_cache_dir() -> tp.Optional[str]:
     return os.environ.get('AUDIOCRAFT_CACHE_DIR', None)
 
 
+_CHECKPOINT_SAFE_GLOBALS = [
+    DictConfig, omegaconf.base.ContainerMetadata, omegaconf.base.Metadata, omegaconf.nodes.AnyNode,
+    collections.defaultdict, dict, tp.Any,
+]
+
+
 def _get_state_dict(
     file_or_url_or_id: tp.Union[Path, str],
     filename: tp.Optional[str] = None,
     device='cpu',
     cache_dir: tp.Optional[str] = None,
 ):
-    if cache_dir is None:
-        cache_dir = get_audiocraft_cache_dir()
-    # Return the state dict either from a file or url
-    file_or_url_or_id = str(file_or_url_or_id)
-    assert isinstance(file_or_url_or_id, str)
+    # torch>=2.6 loads with weights_only=True. Some checkpoints (e.g. MultiBand Diffusion) pickle
+    # their omegaconf config, so allowlist exactly those classes instead of disabling the check.
+    with torch.serialization.safe_globals(_CHECKPOINT_SAFE_GLOBALS):
+        if cache_dir is None:
+            cache_dir = get_audiocraft_cache_dir()
+        # Return the state dict either from a file or url
+        file_or_url_or_id = str(file_or_url_or_id)
+        assert isinstance(file_or_url_or_id, str)
 
-    if os.path.isfile(file_or_url_or_id):
-        return torch.load(file_or_url_or_id, map_location=device)
+        if os.path.isfile(file_or_url_or_id):
+            return torch.load(file_or_url_or_id, map_location=device)
 
-    if os.path.isdir(file_or_url_or_id):
-        file = f"{file_or_url_or_id}/{filename}"
-        return torch.load(file, map_location=device)
+        if os.path.isdir(file_or_url_or_id):
+            file = f"{file_or_url_or_id}/{filename}"
+            return torch.load(file, map_location=device)
 
-    elif file_or_url_or_id.startswith('https://'):
-        return torch.hub.load_state_dict_from_url(file_or_url_or_id, map_location=device, check_hash=True)
+        elif file_or_url_or_id.startswith('https://'):
+            return torch.hub.load_state_dict_from_url(file_or_url_or_id, map_location=device, check_hash=True)
 
-    else:
-        assert filename is not None, "filename needs to be defined if using HF checkpoints"
-        file = hf_hub_download(
-            repo_id=file_or_url_or_id,
-            filename=filename,
-            cache_dir=cache_dir,
-            library_name="audiocraft",
-            library_version=audiocraft.__version__,
-        )
-        return torch.load(file, map_location=device)
+        else:
+            assert filename is not None, "filename needs to be defined if using HF checkpoints"
+            file = hf_hub_download(
+                repo_id=file_or_url_or_id,
+                filename=filename,
+                cache_dir=cache_dir,
+                library_name="audiocraft",
+                library_version=audiocraft.__version__,
+            )
+            return torch.load(file, map_location=device)
 
 
 def load_compression_model_ckpt(file_or_url_or_id: tp.Union[Path, str], cache_dir: tp.Optional[str] = None):

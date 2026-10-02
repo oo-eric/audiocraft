@@ -8,16 +8,16 @@
 # also released under the MIT license.
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor
 import logging
 import os
 from pathlib import Path
-import subprocess as sp
 import sys
 from tempfile import NamedTemporaryFile
 import time
 import typing as tp
-import warnings
+
+# Some ops have no MPS kernel yet; let them fall back to CPU. Must be set before importing torch.
+os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
 
 from einops import rearrange
 import torch
@@ -37,21 +37,12 @@ MAX_BATCH_SIZE = 12
 BATCHED_DURATION = 15
 INTERRUPTING = False
 MBD = None
-# We have to wrap subprocess call to clean a bit the log when using gr.make_waveform
-_old_call = sp.call
-
-
-def _call_nostderr(*args, **kwargs):
-    # Avoid ffmpeg vomiting on the logs.
-    kwargs['stderr'] = sp.DEVNULL
-    kwargs['stdout'] = sp.DEVNULL
-    _old_call(*args, **kwargs)
-
-
-sp.call = _call_nostderr
-# Preallocating the pool of processes.
-pool = ProcessPoolExecutor(4)
-pool.__enter__()
+if torch.cuda.is_available():
+    DEVICE = 'cuda'
+elif torch.backends.mps.is_available():
+    DEVICE = 'mps'
+else:
+    DEVICE = 'cpu'
 
 
 def interrupt():
@@ -81,32 +72,25 @@ class FileCleaner:
 file_cleaner = FileCleaner()
 
 
-def make_waveform(*args, **kwargs):
-    # Further remove some warnings.
-    be = time.time()
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        out = gr.make_waveform(*args, **kwargs)
-        print("Make a video took", time.time() - be)
-        return out
-
-
 def load_model(version='facebook/musicgen-melody'):
     global MODEL
-    print("Loading model", version)
+    print("Loading model", version, "on", DEVICE)
     if MODEL is None or MODEL.name != version:
-        # Clear PyTorch CUDA cache and delete model
+        # Clear the accelerator cache and delete model
         del MODEL
-        torch.cuda.empty_cache()
+        if DEVICE == 'cuda':
+            torch.cuda.empty_cache()
+        elif DEVICE == 'mps':
+            torch.mps.empty_cache()
         MODEL = None  # in case loading would crash
-        MODEL = MusicGen.get_pretrained(version)
+        MODEL = MusicGen.get_pretrained(version, device=DEVICE)
 
 
 def load_diffusion():
     global MBD
     if MBD is None:
         print("loading MBD")
-        MBD = MultiBandDiffusion.get_mbd_musicgen()
+        MBD = MultiBandDiffusion.get_mbd_musicgen(device=DEVICE)
 
 
 def _do_predictions(texts, melodies, duration, progress=False, gradio_progress=None, **gen_kwargs):
@@ -153,30 +137,25 @@ def _do_predictions(texts, melodies, duration, progress=False, gradio_progress=N
             outputs_diffusion = rearrange(outputs_diffusion, '(s b) c t -> b (s c) t', s=2)
         outputs = torch.cat([outputs[0], outputs_diffusion], dim=0)
     outputs = outputs.detach().cpu().float()
-    pending_videos = []
     out_wavs = []
     for output in outputs:
         with NamedTemporaryFile("wb", suffix=".wav", delete=False) as file:
             audio_write(
                 file.name, output, MODEL.sample_rate, strategy="loudness",
                 loudness_headroom_db=16, loudness_compressor=True, add_suffix=False)
-            pending_videos.append(pool.submit(make_waveform, file.name))
             out_wavs.append(file.name)
             file_cleaner.add(file.name)
-    out_videos = [pending_video.result() for pending_video in pending_videos]
-    for video in out_videos:
-        file_cleaner.add(video)
     print("batch finished", len(texts), time.time() - be)
     print("Tempfiles currently stored: ", len(file_cleaner.files))
-    return out_videos, out_wavs
+    return out_wavs
 
 
 def predict_batched(texts, melodies):
     max_text_length = 512
     texts = [text[:max_text_length] for text in texts]
     load_model('facebook/musicgen-stereo-melody')
-    res = _do_predictions(texts, melodies, BATCHED_DURATION)
-    return res
+    wavs = _do_predictions(texts, melodies, BATCHED_DURATION)
+    return [wavs]
 
 
 def predict_full(model, model_path, decoder, text, melody, duration, topk, topp, temperature, cfg_coef, progress=gr.Progress()):
@@ -218,27 +197,27 @@ def predict_full(model, model_path, decoder, text, melody, duration, topk, topp,
             raise gr.Error("Interrupted.")
     MODEL.set_custom_progress_callback(_progress)
 
-    videos, wavs = _do_predictions(
+    wavs = _do_predictions(
         [text], [melody], duration, progress=True,
         top_k=topk, top_p=topp, temperature=temperature, cfg_coef=cfg_coef,
         gradio_progress=progress)
     if USE_DIFFUSION:
-        return videos[0], wavs[0], videos[1], wavs[1]
-    return videos[0], wavs[0], None, None
+        return wavs[0], wavs[1]
+    return wavs[0], None
 
 
 def toggle_audio_src(choice):
     if choice == "mic":
-        return gr.update(source="microphone", value=None, label="Microphone")
+        return gr.update(sources=["microphone"], value=None, label="Microphone")
     else:
-        return gr.update(source="upload", value=None, label="File")
+        return gr.update(sources=["upload"], value=None, label="File")
 
 
 def toggle_diffusion(choice):
     if choice == "MultiBand_Diffusion":
-        return [gr.update(visible=True)] * 2
+        return gr.update(visible=True)
     else:
-        return [gr.update(visible=False)] * 2
+        return gr.update(visible=False)
 
 
 def ui_full(launch_kwargs):
@@ -283,14 +262,12 @@ def ui_full(launch_kwargs):
                     temperature = gr.Number(label="Temperature", value=1.0, interactive=True)
                     cfg_coef = gr.Number(label="Classifier Free Guidance", value=3.0, interactive=True)
             with gr.Column():
-                output = gr.Video(label="Generated Music")
-                audio_output = gr.Audio(label="Generated Music (wav)", type='filepath')
-                diffusion_output = gr.Video(label="MultiBand Diffusion Decoder")
-                audio_diffusion = gr.Audio(label="MultiBand Diffusion Decoder (wav)", type='filepath')
-        submit.click(toggle_diffusion, decoder, [diffusion_output, audio_diffusion], queue=False,
+                audio_output = gr.Audio(label="Generated Music", type='filepath')
+                audio_diffusion = gr.Audio(label="MultiBand Diffusion Decoder", type='filepath')
+        submit.click(toggle_diffusion, decoder, [audio_diffusion], queue=False,
                      show_progress=False).then(predict_full, inputs=[model, model_path, decoder, text, melody, duration, topk, topp,
                                                                      temperature, cfg_coef],
-                                               outputs=[output, audio_output, diffusion_output, audio_diffusion])
+                                               outputs=[audio_output, audio_diffusion])
         radio.change(toggle_audio_src, radio, [melody], queue=False, show_progress=False)
 
         gr.Examples(
@@ -334,7 +311,7 @@ def ui_full(launch_kwargs):
                 ],
             ],
             inputs=[text, melody, model, decoder],
-            outputs=[output]
+            outputs=[audio_output]
         )
         gr.Markdown(
             """
@@ -408,15 +385,14 @@ def ui_batched(launch_kwargs):
                     with gr.Column():
                         radio = gr.Radio(["file", "mic"], value="file",
                                          label="Condition on a melody (optional) File or Mic")
-                        melody = gr.Audio(source="upload", type="numpy", label="File",
+                        melody = gr.Audio(sources=["upload"], type="numpy", label="File",
                                           interactive=True, elem_id="melody-input")
                 with gr.Row():
                     submit = gr.Button("Generate")
             with gr.Column():
-                output = gr.Video(label="Generated Music")
-                audio_output = gr.Audio(label="Generated Music (wav)", type='filepath')
+                audio_output = gr.Audio(label="Generated Music", type='filepath')
         submit.click(predict_batched, inputs=[text, melody],
-                     outputs=[output, audio_output], batch=True, max_batch_size=MAX_BATCH_SIZE)
+                     outputs=[audio_output], batch=True, max_batch_size=MAX_BATCH_SIZE)
         radio.change(toggle_audio_src, radio, [melody], queue=False, show_progress=False)
         gr.Examples(
             fn=predict_batched,
@@ -443,7 +419,7 @@ def ui_batched(launch_kwargs):
                 ],
             ],
             inputs=[text, melody],
-            outputs=[output]
+            outputs=[audio_output]
         )
         gr.Markdown("""
         ### More details

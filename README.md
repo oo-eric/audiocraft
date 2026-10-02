@@ -8,12 +8,14 @@ for two state-of-the-art AI generative models producing high-quality audio: Audi
 
 
 ## Installation
-AudioCraft requires Python 3.9, PyTorch 2.1.0. To install AudioCraft, you can run the following:
+This fork targets PyTorch 2.14.1 and has been tested with Python 3.12 on macOS Apple Silicon
+(see [below](#macos-apple-silicon)); CUDA hasn't been tested on this version. Upstream AudioCraft
+requires Python 3.9 and PyTorch 2.1.0. To install AudioCraft, you can run the following:
 
 ```shell
-# Best to make sure you have torch installed first, in particular before installing xformers.
+# Best to make sure you have torch installed first.
 # Don't run this if you already have PyTorch installed.
-python -m pip install 'torch==2.1.0'
+python -m pip install 'torch==2.14.1'
 # You might need the following before trying to install the packages
 python -m pip install setuptools wheel
 # Then proceed to one of the following
@@ -32,10 +34,40 @@ conda install "ffmpeg<5" -c conda-forge
 
 ### macOS Apple Silicon
 
-AudioCraft runs on macOS Apple Silicon (M1/M2/M3/M4) without requiring xformers. The xformers dependency is optional and will be skipped automatically on macOS ARM. Note that:
-- A GPU is recommended for faster inference, but CPU works for all models
-- CPU inference is slower (several minutes for medium-sized models)
-- All models (MusicGen, AudioGen, MAGNeT, JASCO) are supported
+AudioCraft runs on Apple Silicon (M1–M4) and uses the Metal GPU through PyTorch's `mps` device. You
+don't need xformers: without it, attention runs on PyTorch's `scaled_dot_product_attention`.
+Installing xformers on macOS doesn't help, since its attention kernels are CUDA-only.
+
+```shell
+uv venv --python 3.12 .venv && source .venv/bin/activate
+uv pip install torch==2.14.1 torchaudio==2.11.0
+uv pip install av einops "flashy>=0.0.1" "hydra-core>=1.1" hydra_colorlog julius num2words \
+    "numpy<2.0.0" sentencepiece spacy huggingface_hub tqdm "transformers>=4.31.0" demucs librosa \
+    soundfile torchmetrics encodec protobuf torchdiffeq
+uv pip install --no-deps -e .
+uv pip install gradio  # optional, for the web demo
+```
+
+Pass `device='mps'` when loading a model:
+
+```python
+from audiocraft.models import MusicGen
+model = MusicGen.get_pretrained('facebook/musicgen-small', device='mps')
+```
+
+Some ops have no MPS kernel yet, so set `PYTORCH_ENABLE_MPS_FALLBACK=1` to let them fall back to the
+CPU. All of MusicGen (including melody conditioning), AudioGen, MAGNeT, JASCO and the MultiBand
+Diffusion decoder run on MPS. Generation times on MPS with PyTorch 2.14.1 (after a warm-up run):
+
+| Model | Audio | Time |
+|-------|-------|------|
+| MusicGen-small | 5s | 3.0s |
+| MusicGen-medium | 5s | 6.6s |
+| AudioGen-medium | 5s | 7.3s |
+| MAGNeT-small | 10s | 4.4s |
+| JASCO-400M | 10s | 19.4s (default dopri5 solver), 6.3s (`euler=True, euler_steps=50`) |
+
+The Gradio demo (`python -m demos.musicgen_app`) picks MPS automatically.
 
 ## Models
 

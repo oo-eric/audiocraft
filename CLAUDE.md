@@ -31,6 +31,24 @@ This repo has been patched to run on macOS ARM (Apple Silicon) without xformers:
      does, but the transformer weights are already fp16, so autocast adds nothing (see
      "Precision on MPS")
 
+4. **audiocraft/models/flow_matching.py**
+   - On MPS, passes `dtype=torch.float32` to torchdiffeq's dopri5 solver. It keeps step sizes and
+     tolerances in float64 by default, which MPS doesn't support, so JASCO crashed unless you
+     switched to `euler=True`. On CPU, float32 vs float64 time handling gave the same 122 solver
+     steps and latents within 4e-6 relative
+
+5. **audiocraft/models/loaders.py**
+   - `_get_state_dict` allowlists the omegaconf classes some checkpoints pickle (via
+     `torch.serialization.safe_globals`). torch 2.6+ defaults to `weights_only=True`, which made the
+     MultiBand Diffusion checkpoint fail to load. Avoids `weights_only=False`, which would let a
+     checkpoint run arbitrary code
+
+6. **demos/musicgen_app.py**
+   - Picks cuda > mps > cpu (it used to fall back to CPU on anything without CUDA) and defaults
+     `PYTORCH_ENABLE_MPS_FALLBACK=1`
+   - Ported to Gradio 6: `gr.make_waveform` is gone, so the video outputs were dropped (the audio
+     player draws its own waveform), and the 3.x `source=` became `sources=[...]`
+
 ## Setup (macOS ARM)
 
 Python 3.12 virtualenv managed with `uv`, torch 2.14.1 + torchaudio 2.11.0:
@@ -67,6 +85,7 @@ torch 2.14.1, generation time only (after model load + one warm-up generate). "B
 | AudioGen-medium (5s) | 11.9s | 7.3s |
 | MAGNeT-small (10s) | 4.8s | 4.4s |
 | JASCO-400M (10s, Euler 50 steps) | 6.5s | 6.3s |
+| JASCO-400M (10s, default dopri5) | crashed | 19.4s |
 
 Outputs match: MusicGen/AudioGen tokens are bit-identical, JASCO latents differ by ~1e-6
 relative, and MAGNeT forward logits differ by ~1e-6 with every argmax agreeing (its sampled tokens
@@ -97,7 +116,7 @@ AudioGen-medium 29s / 82s, MAGNeT-small (10s) 8s / 29s.
 
 ## Key Files
 
-- `demos/musicgen_app.py` - Gradio UI (was pinned to gradio==3.50.2; untested on torch 2.14)
+- `demos/musicgen_app.py` - Gradio UI (gradio 6.29): `python -m demos.musicgen_app`, then open the URL it prints
 
 ## Common Tasks
 
@@ -136,11 +155,9 @@ audio_write(
 ## Known Issues
 
 - xformers has no macOS wheels
-- Gradio demo was pinned to 3.50.2 and hasn't been tested on the torch 2.14 setup
+- Gradio sends usage analytics by default; set `GRADIO_ANALYTICS_ENABLED=False` to turn that off
 - `torchaudio.load`/`save` need `torchcodec` on torchaudio 2.9+. Inference is unaffected, but the
   mp3/aac augmentation in `audiocraft/data/audio_utils.py` and the visqol metric will fail without it
-- JASCO on MPS fails with its default dopri5 ODE solver: torchdiffeq builds its tolerances in
-  float64, which MPS doesn't support. Use `set_generation_params(euler=True, euler_steps=50)`
 - Installing xformers on macOS buys nothing: there's no wheel, the source build needs `-fopenmp`
   stripped for Apple clang, and every attention kernel is CUDA/ROCm only (MAGNeT crashes on MPS
   with it installed, since its loader asks for the xformers backend)
